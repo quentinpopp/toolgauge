@@ -1,0 +1,132 @@
+name: github-issues
+system: You are an assistant that manages GitHub issues for the user.
+
+tools:
+  - name: create_issue
+    description: >
+      Create a new issue in a GitHub repository. Use this when the user wants to
+      report a bug or file a feature request.
+    parameters:
+      type: object
+      properties:
+        repo: {type: string, description: "Repository as owner/name"}
+        title: {type: string, description: "Short summary of the issue"}
+        body: {type: string, description: "Details in Markdown"}
+        labels: {type: array, items: {type: string}}
+      required: [repo, title]
+
+  - name: search_issues
+    description: >
+      Search existing issues in a repository by text, state (open or closed) or
+      label. Use this to find, list or look up issues before acting on them.
+    parameters:
+      type: object
+      properties:
+        repo: {type: string}
+        query: {type: string, description: "Free-text search terms"}
+        state: {type: string, enum: [open, closed, all]}
+      required: [repo]
+
+  - name: close_issue
+    description: >
+      Close an issue by number, optionally with a closing comment. Use this when
+      an issue is fixed, resolved, a duplicate or no longer relevant.
+    parameters:
+      type: object
+      properties:
+        repo: {type: string}
+        number: {type: integer}
+        comment: {type: string}
+      required: [repo, number]
+
+  - name: add_label
+    description: >
+      Add a label to an existing issue by number, for example to tag or
+      categorise it as bug, priority or needs-triage.
+    parameters:
+      type: object
+      properties:
+        repo: {type: string}
+        number: {type: integer}
+        label: {type: string}
+      required: [repo, number, label]
+
+scenarios:
+  - id: report-bug
+    prompt: "Please report a bug in acme/web: the login button is broken on Safari."
+    expect:
+      tool: create_issue
+      args:
+        repo: acme/web
+        title: {contains: login}
+
+  - id: feature-request
+    prompt: "File a feature request in acme/api for dark mode support."
+    expect:
+      tool: create_issue
+      args:
+        repo: acme/api
+        title: {contains: dark mode}
+
+  - id: find-open-issues
+    prompt: "Find open issues in acme/web that mention checkout."
+    expect:
+      tool: search_issues
+      args:
+        repo: acme/web
+        query: {contains: checkout}
+        state: open
+
+  - id: list-closed
+    prompt: "List the closed issues in acme/api."
+    expect:
+      tool: search_issues
+      args:
+        repo: acme/api
+        state: {one_of: [closed, all]}
+
+  - id: close-fixed
+    prompt: "Issue 42 in acme/web is fixed now, close it."
+    expect:
+      tool: close_issue
+      args:
+        repo: acme/web
+        number: 42
+
+  - id: close-duplicate
+    prompt: "Close acme/api issue 7, it is a duplicate of 3."
+    expect:
+      tool: close_issue
+      args:
+        repo: acme/api
+        number: 7
+        comment: {contains: duplicate}
+
+  - id: tag-priority
+    prompt: "Tag issue 15 in acme/web with the priority label."
+    expect:
+      tool: add_label
+      args:
+        repo: acme/web
+        number: 15
+        label: priority
+
+  - id: triage
+    prompt: "Categorise acme/api issue 9 as needs-triage."
+    expect:
+      tool: add_label
+      args:
+        repo: acme/api
+        number: 9
+        label: needs-triage
+
+  # The agent should not reach for a tool when none fits.
+  - id: no-tool-smalltalk
+    prompt: "Thanks, that was helpful!"
+    expect:
+      no_tool: true
+
+  - id: no-tool-general-question
+    prompt: "What is the difference between git merge and git rebase?"
+    expect:
+      no_tool: true

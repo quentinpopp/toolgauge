@@ -1,0 +1,9 @@
+# Deliberately poor tool descriptions, the kind that slip in during a quick
+# refactor. Run the suite with these to see toolgauge catch the regression:
+#
+#   toolgauge run --descriptions examples/github-issues/descriptions-vague.yaml \
+#     --out vague.json examples/github-issues/suite.yaml
+create_issue: Handles issue creation.
+search_issues: Issue lookup.
+close_issue: Updates issue state.
+add_label: Issue metadata.

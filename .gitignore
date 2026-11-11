@@ -1,0 +1,4 @@
+/toolgauge
+*.json
+!examples/**/*.json
+dist/
