@@ -92,7 +92,9 @@ and jitter; a 400 is not, because it will fail the same way again and retrying
 only hides a broken request. Providers mark errors with
 `provider.Retryable(err)`. The timeout applies per attempt, so one slow
 request cannot use up the whole budget. Each retry uses a new seed: a retry
-is a fresh sample, not a replay.
+is a fresh sample, not a replay. The backoff doubles up to a cap (30 s by
+default) and stops doubling there, so a high retry count neither waits for
+hours nor overflows.
 
 ### Reproducibility
 
@@ -130,6 +132,32 @@ not tune descriptions for the mock.
 Unknown fields are errors (`promt:` instead of `prompt:` fails loudly), and
 validation reports every problem at once. A typo that silently skips an
 expectation would make a suite pass for the wrong reason.
+
+The same applies to matchers: an argument written as a mapping must be
+exactly one of `equals`, `contains`, `one_of` or `present`. An earlier
+version treated any other mapping as a literal value to compare against, so
+`{contians: login}` became an equality check that failed every trial and
+looked like a model problem. Object values now need an explicit `equals`.
+
+### Fingerprints: comparing like with like
+
+A pass rate only means something together with the test that produced it.
+Each report stores a hash of every scenario's prompt and expectation, and a
+separate hash of the system prompt and tool definitions. `compare` uses them
+in two different ways:
+
+- A scenario whose fingerprint changed is reported as `changed` and left out
+  of the statistics and the total, because its baseline measured something
+  else.
+- Changed tool definitions are only noted, not rejected: comparing two
+  versions of the tools is the main reason to run `compare`.
+
+### Interrupted runs
+
+Against a real API, trials cost money. If a run is cancelled, the runner
+stops sending requests (also during a retry backoff), drops trials that were
+cut off mid-request, and returns the ones that finished. The CLI writes them
+as a report marked `incomplete`, and `compare` warns about it.
 
 ## Not in scope (yet)
 

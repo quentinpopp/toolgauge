@@ -86,6 +86,41 @@ func TestUnknownFieldIsRejected(t *testing.T) {
 	}
 }
 
+func TestMatcherTyposAreRejected(t *testing.T) {
+	for _, bad := range []string{
+		`{contians: login}`,          // misspelled matcher
+		`{state: open}`,              // object value without equals
+		`{contains: a, one_of: [b]}`, // two matchers at once
+	} {
+		_, err := Parse([]byte(strings.Replace(validSuite, "repo: acme/web", "repo: "+bad, 1)))
+		if err == nil {
+			t.Errorf("%s should be rejected", bad)
+		}
+	}
+}
+
+func TestFingerprints(t *testing.T) {
+	a, _ := Parse([]byte(validSuite))
+	b, _ := Parse([]byte(validSuite))
+	if a.Scenarios[0].Fingerprint() != b.Scenarios[0].Fingerprint() || a.ToolsFingerprint() != b.ToolsFingerprint() {
+		t.Fatal("same input must give the same fingerprints")
+	}
+	edited, _ := Parse([]byte(strings.Replace(validSuite, "prompt: open a bug", "prompt: open a ticket", 1)))
+	if edited.Scenarios[0].Fingerprint() == a.Scenarios[0].Fingerprint() {
+		t.Error("editing the prompt must change the scenario fingerprint")
+	}
+	if edited.Scenarios[1].Fingerprint() != a.Scenarios[1].Fingerprint() {
+		t.Error("other scenarios must keep their fingerprint")
+	}
+	reworded, _ := a.WithDescriptions(map[string]string{"create_issue": "other words"})
+	if reworded.ToolsFingerprint() == a.ToolsFingerprint() {
+		t.Error("new descriptions must change the tools fingerprint")
+	}
+	if reworded.Scenarios[0].Fingerprint() != a.Scenarios[0].Fingerprint() {
+		t.Error("new descriptions must not change scenario fingerprints")
+	}
+}
+
 func TestMatchers(t *testing.T) {
 	cases := []struct {
 		yaml   string
@@ -102,6 +137,7 @@ func TestMatchers(t *testing.T) {
 		{`{one_of: [open, all]}`, "closed", true, false},
 		{`{present: true}`, "", true, true},
 		{`{present: true}`, nil, false, false},
+		{`{present: true}`, nil, true, false}, // explicit null is not a value
 		{`[a, b]`, []any{"a", "b"}, true, true},
 		{`{equals: {contains: x}}`, map[string]any{"contains": "x"}, true, true},
 	}

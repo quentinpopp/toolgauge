@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -152,6 +153,75 @@ func TestCancelStopsRun(t *testing.T) {
 	}
 	if c := f.calls.Load(); c > 10 {
 		t.Errorf("%d requests after cancel, want only the in-flight ones", c)
+	}
+}
+
+func TestCancelKeepsFinishedTrials(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var n atomic.Int32
+	f := &fake{fn: func(ctx context.Context, req provider.Request) (provider.Response, error) {
+		if n.Add(1) == 6 {
+			cancel()
+			return provider.Response{}, ctx.Err()
+		}
+		return perfect(ctx, req)
+	}}
+	trials, err := Run(ctx, f, suite(t), Config{Runs: 100})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if len(trials) != 5 {
+		t.Fatalf("want the 5 trials that finished before cancel, got %d", len(trials))
+	}
+	for _, tr := range trials {
+		if tr.Outcome != grader.Pass {
+			t.Fatalf("cancelled or unscheduled trial leaked into results: %+v", tr)
+		}
+	}
+}
+
+func TestCancelDuringBackoffSendsNoMoreRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &fake{fn: func(context.Context, provider.Request) (provider.Response, error) {
+		go func() { time.Sleep(10 * time.Millisecond); cancel() }()
+		return provider.Response{}, provider.Retryable(errors.New("429"))
+	}}
+	s := suite(t)
+	s.Scenarios = s.Scenarios[:1]
+	start := time.Now()
+	trials, err := Run(ctx, f, s, Config{Runs: 1, MaxRetries: 5, BaseBackoff: time.Hour})
+	if !errors.Is(err, context.Canceled) || len(trials) != 0 {
+		t.Fatalf("want cancellation and no trials, got %v, %+v", err, trials)
+	}
+	if c := f.calls.Load(); c != 1 {
+		t.Errorf("%d requests, want 1: no retry after cancel", c)
+	}
+	if time.Since(start) > time.Second {
+		t.Error("cancel did not interrupt the backoff")
+	}
+}
+
+func TestBackoffIsCappedAndDoesNotOverflow(t *testing.T) {
+	cfg := Config{BaseBackoff: 200 * time.Millisecond, MaxBackoff: 30 * time.Second}
+	jitter := rand.New(rand.NewPCG(1, 2))
+	prev := time.Duration(0)
+	for attempt := range 100 {
+		d := cfg.backoff(attempt, jitter)
+		if d <= 0 || d > 45*time.Second {
+			t.Fatalf("attempt %d: backoff %v outside (0, 45s]", attempt, d)
+		}
+		if attempt < 5 && d < prev/2 {
+			t.Fatalf("attempt %d: backoff %v should grow (previous %v)", attempt, d, prev)
+		}
+		prev = d
+	}
+}
+
+func TestInvalidConfig(t *testing.T) {
+	for _, cfg := range []Config{{Runs: 0}, {Runs: 1, Concurrency: -1}, {Runs: 1, MaxRetries: -1}, {Runs: 1, Timeout: -1}} {
+		if _, err := Run(context.Background(), &fake{fn: perfect}, suite(t), cfg); err == nil {
+			t.Errorf("%+v should be rejected", cfg)
+		}
 	}
 }
 

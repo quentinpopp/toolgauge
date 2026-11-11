@@ -2,6 +2,7 @@ package mock
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/quentinpopp/toolgauge/internal/provider"
@@ -46,18 +47,23 @@ func TestClearDescriptionsBeatVagueOnes(t *testing.T) {
 }
 
 func TestDeterministic(t *testing.T) {
+	// Many arguments and a high error rate, so any dependence on map order
+	// shows up as different arguments for the same seed.
 	p := New(Config{Temperature: 1, ArgErrorRate: 0.5})
-	req := provider.Request{
-		Prompt: "close the duplicate issue", Tools: tools, Seed: 42,
-		Oracle: &provider.ToolCall{Name: "close_issue", Args: map[string]any{"number": 1.0, "repo": "a/b"}},
+	args := map[string]any{}
+	for _, k := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		args[k] = k
 	}
-	first, _ := p.Complete(context.Background(), req)
-	for range 50 {
-		got, _ := p.Complete(context.Background(), req)
-		if len(got.ToolCalls) != len(first.ToolCalls) ||
-			(len(got.ToolCalls) > 0 && (got.ToolCalls[0].Name != first.ToolCalls[0].Name ||
-				len(got.ToolCalls[0].Args) != len(first.ToolCalls[0].Args))) {
-			t.Fatalf("same seed gave different answers: %+v vs %+v", first, got)
+	for seed := range uint64(30) {
+		req := provider.Request{
+			Prompt: "close the duplicate issue", Tools: tools, Seed: seed,
+			Oracle: &provider.ToolCall{Name: "close_issue", Args: args},
+		}
+		first, _ := p.Complete(context.Background(), req)
+		for range 20 {
+			if got, _ := p.Complete(context.Background(), req); !reflect.DeepEqual(got, first) {
+				t.Fatalf("seed %d gave different answers: %+v vs %+v", seed, first, got)
+			}
 		}
 	}
 }

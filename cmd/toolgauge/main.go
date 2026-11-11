@@ -118,6 +118,9 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	if fs.NArg() != 1 {
 		return errors.New("run needs exactly one suite file")
 	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	s, err := spec.Load(fs.Arg(0))
 	if err != nil {
 		return err
@@ -140,21 +143,28 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		return fmt.Errorf("unknown provider %q (available: mock)", *providerName)
 	}
 
-	trials, err := runner.Run(ctx, p, s, cfg)
-	if err != nil {
-		return fmt.Errorf("run aborted: %w", err)
+	trials, runErr := runner.Run(ctx, p, s, cfg)
+	if runErr != nil && ctx.Err() == nil {
+		return runErr
 	}
+	// A cancelled run still produces a report of the trials that finished,
+	// so tokens already paid for are not thrown away.
 	r := &report.Report{
 		Suite: s.Name, Provider: p.Name(), Model: cfg.Model, Runs: cfg.Runs,
 		Seed: cfg.Seed, CreatedAt: time.Now().UTC(), Trials: trials,
+		Incomplete: runErr != nil,
 	}
 	r.Total, r.Scenarios = report.Build(trials)
+	r.AddFingerprints(s)
 	r.WriteText(stdout)
 	if *out != "" {
 		if err := r.Save(*out); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "\nreport written to %s\n", *out)
+	}
+	if runErr != nil {
+		return fmt.Errorf("run cancelled after %d of %d trials: %w", len(trials), len(s.Scenarios)*cfg.Runs, runErr)
 	}
 	return nil
 }

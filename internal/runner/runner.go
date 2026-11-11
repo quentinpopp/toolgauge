@@ -26,27 +26,57 @@ type Config struct {
 	Timeout    time.Duration
 	MaxRetries int
 	// BaseBackoff is the delay before the first retry; it doubles each time
-	// and gets up to 50% jitter.
+	// up to MaxBackoff and gets up to 50% jitter on top.
 	BaseBackoff time.Duration
+	MaxBackoff  time.Duration
 	Seed        uint64
 }
 
-func (c *Config) defaults() {
-	if c.Runs <= 0 {
-		c.Runs = 1
+// Validate rejects settings that cannot produce a meaningful run. Zero values
+// for Concurrency, Timeout and the backoffs mean "use the default".
+func (c Config) Validate() error {
+	switch {
+	case c.Runs < 1:
+		return errors.New("runs must be at least 1")
+	case c.Concurrency < 0:
+		return errors.New("concurrency must not be negative")
+	case c.MaxRetries < 0:
+		return errors.New("retries must not be negative")
+	case c.Timeout < 0 || c.BaseBackoff < 0 || c.MaxBackoff < 0:
+		return errors.New("durations must not be negative")
 	}
-	if c.Concurrency <= 0 {
+	return nil
+}
+
+func (c *Config) defaults() {
+	if c.Concurrency == 0 {
 		c.Concurrency = 1
 	}
-	if c.Timeout <= 0 {
+	if c.Timeout == 0 {
 		c.Timeout = 60 * time.Second
 	}
-	if c.MaxRetries < 0 {
-		c.MaxRetries = 0
-	}
-	if c.BaseBackoff <= 0 {
+	if c.BaseBackoff == 0 {
 		c.BaseBackoff = 200 * time.Millisecond
 	}
+	if c.MaxBackoff == 0 {
+		c.MaxBackoff = 30 * time.Second
+	}
+	c.MaxBackoff = max(c.MaxBackoff, c.BaseBackoff)
+}
+
+// backoff returns the wait before retry number attempt+1: BaseBackoff doubled
+// per attempt, capped at MaxBackoff, plus up to 50% jitter. Doubling stops at
+// the cap, so a high retry count cannot overflow.
+func (c Config) backoff(attempt int, jitter *rand.Rand) time.Duration {
+	d := c.BaseBackoff
+	for range attempt {
+		if d >= c.MaxBackoff/2 {
+			d = c.MaxBackoff
+			break
+		}
+		d *= 2
+	}
+	return d + time.Duration(jitter.Int64N(int64(d)/2+1))
 }
 
 // Trial is the result of one scenario run once.
@@ -69,11 +99,18 @@ type job struct {
 
 // Run executes the suite and returns one trial per scenario and repetition,
 // ordered by scenario then index regardless of completion order. Provider
-// errors become trials with outcome "error"; Run itself only fails if ctx is
-// cancelled.
+// errors become trials with outcome "error".
+//
+// If ctx is cancelled, Run stops sending requests and returns the trials that
+// finished before the cancellation, together with ctx.Err(), so the caller
+// can still save what was paid for.
 func Run(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Config) ([]Trial, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	cfg.defaults()
 	trials := make([]Trial, len(s.Scenarios)*cfg.Runs)
+	done := make([]bool, len(trials))
 	jobs := make(chan job)
 
 	var wg sync.WaitGroup
@@ -82,7 +119,7 @@ func Run(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Config) ([
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				trials[j.slot] = runTrial(ctx, p, s, cfg, j)
+				trials[j.slot], done[j.slot] = runTrial(ctx, p, s, cfg, j)
 			}
 		}()
 	}
@@ -99,10 +136,21 @@ feed:
 	}
 	close(jobs)
 	wg.Wait()
-	return trials, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		finished := make([]Trial, 0, len(trials))
+		for i, t := range trials {
+			if done[i] {
+				finished = append(finished, t)
+			}
+		}
+		return finished, err
+	}
+	return trials, nil
 }
 
-func runTrial(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Config, j job) Trial {
+// runTrial runs one trial. The bool is false if the run was cancelled before
+// the trial reached a result of its own, so it must not be counted.
+func runTrial(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Config, j job) (Trial, bool) {
 	t := Trial{Scenario: j.sc.ID, Index: j.index}
 	req := provider.Request{
 		Model:  cfg.Model,
@@ -125,27 +173,32 @@ func runTrial(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Confi
 		resp, err = p.Complete(actx, req)
 		timedOut := errors.Is(actx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 		cancel()
-		if err == nil || attempt >= cfg.MaxRetries || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			// Whatever came back was cut short by the cancellation.
+			return t, false
+		}
+		if err == nil || attempt >= cfg.MaxRetries {
 			break
 		}
 		if !provider.IsRetryable(err) && !timedOut {
 			break
 		}
-		backoff := cfg.BaseBackoff << attempt
-		backoff += time.Duration(jitter.Int64N(int64(backoff)/2 + 1))
+		wait := time.NewTimer(cfg.backoff(attempt, jitter))
 		select {
-		case <-time.After(backoff):
+		case <-wait.C:
 		case <-ctx.Done():
+			wait.Stop()
+			return t, false
 		}
 	}
 	t.Latency = time.Since(start)
 	if err != nil {
 		t.Outcome, t.Detail = grader.Error, err.Error()
-		return t
+		return t, true
 	}
 	t.ToolCalls, t.Usage = resp.ToolCalls, resp.Usage
 	t.Outcome, t.Detail = grader.Grade(j.sc.Expect, resp)
-	return t
+	return t, true
 }
 
 func oracle(e spec.Expectation) *provider.ToolCall {

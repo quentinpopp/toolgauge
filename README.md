@@ -63,6 +63,8 @@ toolgauge compare baseline.json current.json
 ```
 
 ```
+note: tool definitions or system prompt differ from the baseline
+
 SCENARIO                  BASELINE       CURRENT       DELTA    P (HOLM)  STATUS
 report-bug                70% (14/20)    0% (0/20)     -70 pp   <0.001    REGRESSED
 feature-request           100% (20/20)   10% (2/20)    -90 pp   <0.001    REGRESSED
@@ -76,8 +78,8 @@ regression detected
 ```
 
 `compare` exits with 1, so a CI job fails. Running the unchanged suite again
-with another seed (`--seed 7`) gives 179/200 instead of 183/200, and toolgauge
-correctly reports that as noise (p = 0.31, no regression).
+with another seed (`--seed 7`) gives 181/200 instead of 183/200, and toolgauge
+correctly reports that as noise (p = 0.43, no regression).
 
 ## Writing a suite
 
@@ -112,9 +114,13 @@ scenarios:
       no_tool: true
 ```
 
+An argument written as a mapping is always a matcher, so a typo such as
+`{contians: login}` is an error rather than a silent equality check. To expect
+an object value, wrap it: `filter: {equals: {state: open}}`.
+
 `toolgauge validate` checks a suite before you spend tokens on it: unknown
 tools, arguments the tool does not have, duplicate IDs and typos in field
-names are all reported at once.
+names or matchers are all reported at once.
 
 ## Commands
 
@@ -126,6 +132,12 @@ names are all reported at once.
 
 `run --descriptions <file>` swaps in alternative tool descriptions without
 copying the suite, which is how you compare wordings.
+
+Reports record a fingerprint of each scenario and of the tool definitions.
+`compare` marks a scenario whose prompt or expectation was edited as
+`changed` instead of testing it, and notes when the tool definitions differ
+from the baseline. If a run is interrupted (Ctrl-C), the trials that finished
+are still written to `--out`, marked as incomplete.
 
 Exit codes: `0` ok, `1` regression, `2` invalid input or internal error.
 
