@@ -42,6 +42,9 @@ func TestEndToEnd(t *testing.T) {
 	if code != exitRegression || !strings.Contains(out, "REGRESSED") {
 		t.Errorf("vague descriptions should be a regression, got %d:\n%s", code, out)
 	}
+	if !strings.Contains(out, "tool definitions or system prompt differ") {
+		t.Errorf("compare should note that descriptions changed:\n%s", out)
+	}
 }
 
 func TestUsageErrors(t *testing.T) {
@@ -50,6 +53,9 @@ func TestUsageErrors(t *testing.T) {
 		{"bogus"},
 		{"run"},
 		{"run", "--provider", "nope", suite},
+		{"run", "--runs", "0", suite},
+		{"run", "--retries", "-1", suite},
+		{"run", "--concurrency", "-2", suite},
 		{"compare", "only-one.json"},
 		{"validate", "missing.yaml"},
 	} {

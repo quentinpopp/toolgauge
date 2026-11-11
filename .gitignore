@@ -1,4 +1,3 @@
+# Built binary
 /toolgauge
-*.json
-!examples/**/*.json
 dist/

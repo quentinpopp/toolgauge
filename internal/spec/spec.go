@@ -3,6 +3,8 @@
 package spec
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,12 +62,16 @@ const (
 //
 //	repo: acme/web
 //
-// A mapping with exactly one of the keys equals, contains, one_of or present
-// selects another matcher:
+// A mapping always selects a matcher and must have exactly one of the keys
+// equals, contains, one_of or present:
 //
 //	title: {contains: login}
 //	state: {one_of: [open, all]}
 //	body:  {present: true}
+//	filter: {equals: {state: open}}   # an object value needs equals
+//
+// Anything else is an error, so a typo such as {contians: login} cannot turn
+// into an equality check that silently fails every trial.
 type ArgMatcher struct {
 	Kind  MatchKind `json:"kind"`
 	Value any       `json:"value,omitempty"`
@@ -73,17 +79,25 @@ type ArgMatcher struct {
 
 // UnmarshalYAML implements the shorthand described on ArgMatcher.
 func (m *ArgMatcher) UnmarshalYAML(n *yaml.Node) error {
-	if n.Kind == yaml.MappingNode && len(n.Content) == 2 {
+	if n.Kind == yaml.MappingNode {
+		if len(n.Content) != 2 {
+			return fmt.Errorf("line %d: a matcher needs exactly one of equals, contains, one_of, present (wrap object values in equals)", n.Line)
+		}
 		key := n.Content[0].Value
 		switch MatchKind(key) {
 		case MatchEquals, MatchContains, MatchOneOf, MatchPresent:
-			var v any
-			if err := n.Content[1].Decode(&v); err != nil {
-				return err
-			}
-			m.Kind, m.Value = MatchKind(key), normalize(v)
-			return m.check()
+		default:
+			return fmt.Errorf("line %d: unknown matcher %q, want equals, contains, one_of or present (wrap object values in equals)", n.Content[0].Line, key)
 		}
+		var v any
+		if err := n.Content[1].Decode(&v); err != nil {
+			return err
+		}
+		m.Kind, m.Value = MatchKind(key), normalize(v)
+		if err := m.check(); err != nil {
+			return fmt.Errorf("line %d: %w", n.Line, err)
+		}
+		return nil
 	}
 	var v any
 	if err := n.Decode(&v); err != nil {
@@ -112,7 +126,9 @@ func (m ArgMatcher) check() error {
 }
 
 // Match reports whether an actual argument value satisfies the matcher.
-// ok is false when the argument is missing from the call.
+// ok is false when the argument is missing from the call. The YAML shorthand
+// guarantees Kind and Value fit together; matchers built in code must use
+// the same shapes.
 func (m ArgMatcher) Match(actual any, ok bool) bool {
 	if !ok {
 		return false
@@ -120,7 +136,8 @@ func (m ArgMatcher) Match(actual any, ok bool) bool {
 	actual = normalize(actual)
 	switch m.Kind {
 	case MatchPresent:
-		return true
+		// An explicit null is no value: {"body": null} does not supply a body.
+		return actual != nil
 	case MatchContains:
 		s, isStr := actual.(string)
 		return isStr && strings.Contains(strings.ToLower(s), strings.ToLower(m.Value.(string)))
@@ -266,6 +283,37 @@ func (s *Suite) Tool(name string) (Tool, bool) {
 		}
 	}
 	return Tool{}, false
+}
+
+// Fingerprint identifies what a scenario tests: its prompt and expectation.
+// Reports store it so that compare can tell "the model got worse" from "the
+// test was edited but kept its ID".
+func (sc Scenario) Fingerprint() string {
+	return fingerprint(struct {
+		Prompt string
+		Expect Expectation
+	}{sc.Prompt, sc.Expect})
+}
+
+// ToolsFingerprint identifies everything the model sees besides the prompt:
+// the system prompt and the tool definitions. It changes on purpose when
+// comparing descriptions, so compare reports it rather than rejecting it.
+func (s *Suite) ToolsFingerprint() string {
+	return fingerprint(struct {
+		System string
+		Tools  []Tool
+	}{s.System, s.Tools})
+}
+
+// fingerprint hashes the JSON form of v. encoding/json sorts map keys, so the
+// result is stable across runs.
+func fingerprint(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Sprintf("fingerprint: %v", err)) // only plain data reaches here
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
 }
 
 // LoadDescriptions reads a YAML map of tool name to description, used to try

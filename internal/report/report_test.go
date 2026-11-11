@@ -64,6 +64,46 @@ func TestCompareMinDelta(t *testing.T) {
 	}
 }
 
+func TestCompareDropExactlyAtMinDelta(t *testing.T) {
+	// 95% -> 90% is a 5 pp drop, but 0.95-0.90 is 0.0499999… in float64.
+	base := fakeReport(1000, map[string]int{"a": 950}, "a")
+	cur := fakeReport(1000, map[string]int{"a": 900}, "a")
+	if c := Compare(base, cur, opts); !c.Regressed() {
+		t.Fatalf("a drop of exactly min-delta must count, got %+v", c.Diffs[0])
+	}
+}
+
+func TestCompareEditedScenarioIsNotTested(t *testing.T) {
+	base := fakeReport(30, map[string]int{"a": 29, "b": 29}, "a", "b")
+	cur := fakeReport(30, map[string]int{"a": 5, "b": 29}, "a", "b")
+	base.Scenarios[0].Fingerprint, cur.Scenarios[0].Fingerprint = "old", "new"
+	base.Scenarios[1].Fingerprint, cur.Scenarios[1].Fingerprint = "same", "same"
+	c := Compare(base, cur, opts)
+	if c.Diffs[0].Status != Changed || c.Regressed() {
+		t.Fatalf("an edited scenario must be reported as changed, not regressed: %+v", c.Diffs)
+	}
+	// The total only pools scenarios that were compared.
+	if c.Total.Base.Trials != 30 || c.Total.Current.Trials != 30 {
+		t.Fatalf("total should only include b, got %+v / %+v", c.Total.Base, c.Total.Current)
+	}
+}
+
+func TestCompareFlagsToolChangesAndIncompleteRuns(t *testing.T) {
+	base := fakeReport(10, map[string]int{"a": 9}, "a")
+	cur := fakeReport(10, map[string]int{"a": 9}, "a")
+	base.ToolsFingerprint, cur.ToolsFingerprint = "x", "y"
+	cur.Incomplete = true
+	c := Compare(base, cur, opts)
+	if !c.ToolsChanged || !c.Incomplete {
+		t.Fatalf("got %+v", c)
+	}
+	var b strings.Builder
+	c.WriteText(&b)
+	if !strings.Contains(b.String(), "tool definitions") || !strings.Contains(b.String(), "cancelled run") {
+		t.Errorf("warnings missing from output:\n%s", b.String())
+	}
+}
+
 func TestCompareImprovementAndMembership(t *testing.T) {
 	base := fakeReport(30, map[string]int{"a": 10, "gone": 30}, "a", "gone")
 	cur := fakeReport(30, map[string]int{"a": 29, "new": 30}, "a", "new")

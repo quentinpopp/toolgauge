@@ -14,20 +14,39 @@ import (
 
 	"github.com/quentinpopp/toolgauge/internal/grader"
 	"github.com/quentinpopp/toolgauge/internal/runner"
+	"github.com/quentinpopp/toolgauge/internal/spec"
 	"github.com/quentinpopp/toolgauge/internal/stats"
 )
 
 // Report is the saved result of a run. Its JSON form is the baseline format.
 type Report struct {
-	Suite     string            `json:"suite"`
-	Provider  string            `json:"provider"`
-	Model     string            `json:"model,omitempty"`
-	Runs      int               `json:"runs"`
-	Seed      uint64            `json:"seed"`
-	CreatedAt time.Time         `json:"created_at"`
-	Total     Summary           `json:"total"`
-	Scenarios []ScenarioSummary `json:"scenarios"`
-	Trials    []runner.Trial    `json:"trials,omitempty"`
+	Suite     string    `json:"suite"`
+	Provider  string    `json:"provider"`
+	Model     string    `json:"model,omitempty"`
+	Runs      int       `json:"runs"`
+	Seed      uint64    `json:"seed"`
+	CreatedAt time.Time `json:"created_at"`
+	// ToolsFingerprint identifies the system prompt and tool definitions.
+	ToolsFingerprint string `json:"tools_fingerprint,omitempty"`
+	// Incomplete is set when the run was cancelled; only finished trials are
+	// included.
+	Incomplete bool              `json:"incomplete,omitempty"`
+	Total      Summary           `json:"total"`
+	Scenarios  []ScenarioSummary `json:"scenarios"`
+	Trials     []runner.Trial    `json:"trials,omitempty"`
+}
+
+// AddFingerprints records what was tested, so compare can detect edited
+// scenarios and changed tool definitions.
+func (r *Report) AddFingerprints(s *spec.Suite) {
+	r.ToolsFingerprint = s.ToolsFingerprint()
+	fp := map[string]string{}
+	for _, sc := range s.Scenarios {
+		fp[sc.ID] = sc.Fingerprint()
+	}
+	for i := range r.Scenarios {
+		r.Scenarios[i].Fingerprint = fp[r.Scenarios[i].ID]
+	}
 }
 
 // Summary counts passes over some set of trials.
@@ -44,7 +63,8 @@ type Summary struct {
 
 // ScenarioSummary is a Summary for one scenario, with a sample failure.
 type ScenarioSummary struct {
-	ID string `json:"id"`
+	ID          string `json:"id"`
+	Fingerprint string `json:"fingerprint,omitempty"`
 	Summary
 	ExampleFailure string `json:"example_failure,omitempty"`
 }
@@ -117,6 +137,9 @@ func Load(path string) (*Report, error) {
 // WriteText prints a human-readable summary.
 func (r *Report) WriteText(w io.Writer) {
 	fmt.Fprintf(w, "suite %s · provider %s · %d runs per scenario\n\n", r.Suite, r.Provider, r.Runs)
+	if r.Incomplete {
+		fmt.Fprintf(w, "INCOMPLETE: the run was cancelled, only %d finished trials are included\n\n", r.Total.Trials)
+	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SCENARIO\tPASS\tRATE\t95% CI\tEXAMPLE FAILURE")
 	for _, s := range r.Scenarios {

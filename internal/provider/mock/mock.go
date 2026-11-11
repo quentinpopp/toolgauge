@@ -19,9 +19,12 @@ package mock
 import (
 	"context"
 	"errors"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -50,7 +53,22 @@ func DefaultConfig() Config {
 }
 
 // Provider is the mock provider.
-type Provider struct{ cfg Config }
+type Provider struct {
+	cfg Config
+	// toolWords caches the word set of each tool, keyed by its full text, so
+	// thousands of trials over the same tools tokenize them only once.
+	toolWords sync.Map // string -> map[string]bool
+}
+
+func (p *Provider) wordsOf(t spec.Tool) map[string]bool {
+	text := toolText(t)
+	if w, ok := p.toolWords.Load(text); ok {
+		return w.(map[string]bool)
+	}
+	w := stems(text)
+	p.toolWords.Store(text, w)
+	return w
+}
 
 // New returns a mock provider.
 func New(cfg Config) *Provider {
@@ -86,7 +104,7 @@ func (p *Provider) Complete(ctx context.Context, req provider.Request) (provider
 	words := stems(req.Prompt)
 	scores := make([]float64, len(req.Tools)+1)
 	for i, t := range req.Tools {
-		scores[i] = overlap(words, stems(toolText(t)))
+		scores[i] = overlap(words, p.wordsOf(t))
 	}
 	scores[len(req.Tools)] = p.cfg.NoToolScore
 	choice := sample(rng, scores, p.cfg.Temperature)
@@ -97,7 +115,10 @@ func (p *Provider) Complete(ctx context.Context, req provider.Request) (provider
 	}
 	call := provider.ToolCall{Name: req.Tools[choice].Name, Args: map[string]any{}}
 	if req.Oracle != nil && req.Oracle.Name == call.Name {
-		for k, v := range req.Oracle.Args {
+		// Sorted: map order is random in Go, and drawing random numbers in a
+		// random order would make the same seed give different answers.
+		for _, k := range slices.Sorted(maps.Keys(req.Oracle.Args)) {
+			v := req.Oracle.Args[k]
 			if rng.Float64() < p.cfg.ArgErrorRate {
 				if rng.IntN(2) == 0 {
 					continue // forget the argument
@@ -117,9 +138,10 @@ func toolText(t spec.Tool) string {
 	b.WriteString(strings.ReplaceAll(t.Name, "_", " "))
 	b.WriteString(" " + t.Description)
 	props, _ := t.Parameters["properties"].(map[string]any)
-	for name, p := range props {
+	// Sorted, so the same tool always gives the same text (it is a cache key).
+	for _, name := range slices.Sorted(maps.Keys(props)) {
 		b.WriteString(" " + strings.ReplaceAll(name, "_", " "))
-		if m, ok := p.(map[string]any); ok {
+		if m, ok := props[name].(map[string]any); ok {
 			if d, ok := m["description"].(string); ok {
 				b.WriteString(" " + d)
 			}
