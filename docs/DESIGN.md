@@ -24,7 +24,8 @@ suite.yaml ──► spec ──► runner ──► provider (mock | cohere | �
 | Package | Responsibility |
 |---|---|
 | `spec` | Suite format, matchers, validation |
-| `provider` | Interface to a model API; `mock` is a test double |
+| `provider` | Interface to a model API; `mock` is a test double, `cohere` calls the Chat API |
+| `provider/limit`, `provider/cache` | Wrappers: pacing and budget, response cache |
 | `runner` | Worker pool, retries, timeouts, seeds |
 | `grader` | One response against one expectation, failure by cause |
 | `stats` | Wilson interval, Fisher exact test, Holm correction |
@@ -158,6 +159,47 @@ Against a real API, trials cost money. If a run is cancelled, the runner
 stops sending requests (also during a retry backoff), drops trials that were
 cut off mid-request, and returns the ones that finished. The CLI writes them
 as a report marked `incomplete`, and `compare` warns about it.
+
+### Real providers: pacing, cache and budget as wrappers
+
+A Cohere trial key allows 20 chat requests per minute and 1,000 per month.
+One default run of the example suite is 200 requests, a fifth of the month.
+Three wrappers keep that under control, stacked around the provider in this
+order:
+
+```
+cache ──► limit (pacing + budget) ──► cohere
+```
+
+- The **cache** is outermost, so a cached answer neither waits for a rate
+  limit slot nor counts against the budget. Its key covers everything the
+  model sees (model, system prompt, prompt, tools, seed) and nothing else:
+  the mock's oracle is left out, because real models never receive it.
+  Entries are written to a temp file and renamed, so parallel workers and
+  crashes cannot leave half-written files. Errors are never cached.
+- **Pacing** spaces requests evenly instead of letting them out in bursts,
+  because providers measure per-minute limits over sliding windows. The wait
+  for a slot counts against the attempt's timeout, so with pacing on keep
+  `--concurrency` × interval well below `--timeout`.
+- The **budget** counts retries too, because the API does. When it runs out,
+  the runner stops the run like a cancellation: finished trials are kept,
+  the refused one is not recorded as a model error.
+
+Doing this as wrappers rather than inside the runner keeps the runner free of
+provider-specific limits and lets each piece be tested alone.
+
+A `429` carries a `Retry-After` header; the provider passes it on with
+`provider.RetryableAfter` and the runner waits at least that long.
+
+### Cohere adapter
+
+The adapter maps a scenario to one `POST /v2/chat` with a system message, a
+user message and the tools as `{"type": "function", ...}`. The shapes were
+checked against the live API before writing it. Tool call arguments arrive
+as a JSON string; if the model produces invalid JSON there, the call is kept
+with no arguments so the grader reports `bad_args`. That is a model error,
+not a transport error, and must not be retried away. Token counts use
+`billed_units`, which is what the account is charged.
 
 ## Not in scope (yet)
 

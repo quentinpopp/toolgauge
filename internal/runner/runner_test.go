@@ -225,6 +225,48 @@ func TestInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestHonoursRetryAfter(t *testing.T) {
+	var n atomic.Int32
+	f := &fake{fn: func(ctx context.Context, req provider.Request) (provider.Response, error) {
+		if n.Add(1) == 1 {
+			return provider.Response{}, provider.RetryableAfter(errors.New("429"), 150*time.Millisecond)
+		}
+		return perfect(ctx, req)
+	}}
+	s := suite(t)
+	s.Scenarios = s.Scenarios[:1]
+	start := time.Now()
+	trials, _ := Run(context.Background(), f, s, Config{Runs: 1, MaxRetries: 1, BaseBackoff: time.Millisecond})
+	if trials[0].Outcome != grader.Pass {
+		t.Fatalf("want pass after retry, got %+v", trials[0])
+	}
+	if waited := time.Since(start); waited < 150*time.Millisecond {
+		t.Fatalf("retried after %v, but the server asked for 150ms", waited)
+	}
+}
+
+func TestBudgetStopsRunLikeCancel(t *testing.T) {
+	var n atomic.Int32
+	f := &fake{fn: func(ctx context.Context, req provider.Request) (provider.Response, error) {
+		if n.Add(1) > 4 {
+			return provider.Response{}, provider.ErrBudgetExhausted
+		}
+		return perfect(ctx, req)
+	}}
+	trials, err := Run(context.Background(), f, suite(t), Config{Runs: 50})
+	if !errors.Is(err, provider.ErrBudgetExhausted) {
+		t.Fatalf("want ErrBudgetExhausted, got %v", err)
+	}
+	if len(trials) != 4 {
+		t.Fatalf("want the 4 trials paid for, got %d", len(trials))
+	}
+	for _, tr := range trials {
+		if tr.Outcome != grader.Pass {
+			t.Fatalf("budget refusal must not appear as an error trial: %+v", tr)
+		}
+	}
+}
+
 func TestSeedsAreStableAndDistinct(t *testing.T) {
 	a := trialSeed(1, "x", 0)
 	if a != trialSeed(1, "x", 0) {

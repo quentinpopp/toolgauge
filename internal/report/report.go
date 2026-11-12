@@ -28,12 +28,16 @@ type Report struct {
 	CreatedAt time.Time `json:"created_at"`
 	// ToolsFingerprint identifies the system prompt and tool definitions.
 	ToolsFingerprint string `json:"tools_fingerprint,omitempty"`
-	// Incomplete is set when the run was cancelled; only finished trials are
-	// included.
-	Incomplete bool              `json:"incomplete,omitempty"`
-	Total      Summary           `json:"total"`
-	Scenarios  []ScenarioSummary `json:"scenarios"`
-	Trials     []runner.Trial    `json:"trials,omitempty"`
+	// Incomplete is set when the run was cancelled or ran out of budget; only
+	// finished trials are included.
+	Incomplete bool `json:"incomplete,omitempty"`
+	// Requests counts calls that reached the provider, retries included;
+	// CacheHits counts answers served from the cache instead.
+	Requests  int64             `json:"requests"`
+	CacheHits int64             `json:"cache_hits,omitempty"`
+	Total     Summary           `json:"total"`
+	Scenarios []ScenarioSummary `json:"scenarios"`
+	Trials    []runner.Trial    `json:"trials,omitempty"`
 }
 
 // AddFingerprints records what was tested, so compare can detect edited
@@ -136,9 +140,13 @@ func Load(path string) (*Report, error) {
 
 // WriteText prints a human-readable summary.
 func (r *Report) WriteText(w io.Writer) {
-	fmt.Fprintf(w, "suite %s · provider %s · %d runs per scenario\n\n", r.Suite, r.Provider, r.Runs)
+	model := ""
+	if r.Model != "" {
+		model = " · model " + r.Model
+	}
+	fmt.Fprintf(w, "suite %s · provider %s%s · %d runs per scenario\n\n", r.Suite, r.Provider, model, r.Runs)
 	if r.Incomplete {
-		fmt.Fprintf(w, "INCOMPLETE: the run was cancelled, only %d finished trials are included\n\n", r.Total.Trials)
+		fmt.Fprintf(w, "INCOMPLETE: the run was stopped early, only %d finished trials are included\n\n", r.Total.Trials)
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "SCENARIO\tPASS\tRATE\t95% CI\tEXAMPLE FAILURE")
@@ -157,6 +165,14 @@ func (r *Report) WriteText(w io.Writer) {
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(w, "\nfailures: %s\n", strings.Join(parts, ", "))
+	}
+	if r.Provider != "mock" {
+		var in, out int
+		for _, t := range r.Trials {
+			in += t.Usage.InputTokens
+			out += t.Usage.OutputTokens
+		}
+		fmt.Fprintf(w, "requests: %d sent, %d from cache · billed tokens: %d in, %d out\n", r.Requests, r.CacheHits, in, out)
 	}
 }
 

@@ -81,6 +81,33 @@ regression detected
 with another seed (`--seed 7`) gives 181/200 instead of 183/200, and toolgauge
 correctly reports that as noise (p = 0.43, no regression).
 
+## Running against Cohere
+
+```bash
+export COHERE_API_KEY=...        # a free trial key works
+toolgauge run --provider cohere --runs 10 --out cohere.json examples/github-issues/suite.yaml
+```
+
+```
+cohere · model command-a-03-2025 · 100 trials · at most 20 requests/min, so up to 5m0s if nothing is cached
+...
+requests: 100 sent, 0 from cache · billed tokens: …
+```
+
+Trial keys allow 20 chat requests per minute and 1,000 per month, so the
+runner is built to spend them carefully:
+
+- **Pacing.** Requests are spaced to stay under `--rate-limit` (20/min by
+  default for Cohere). A `429` is retried after the server's `Retry-After`.
+- **Cache.** Responses are stored in `.toolgauge-cache/`, keyed by everything
+  the model sees, so rerunning a baseline costs nothing and only changed tool
+  descriptions are sent again. `--no-cache` turns it off.
+- **Budget.** `--max-requests` stops the run before it exceeds a number of
+  API calls, retries included, and saves the finished trials as an
+  incomplete report.
+
+`--model` picks another Cohere model, for example `command-r7b-12-2024`.
+
 ## Writing a suite
 
 ```yaml
@@ -143,15 +170,17 @@ Exit codes: `0` ok, `1` regression, `2` invalid input or internal error.
 
 ## Status and roadmap
 
-This is an early version. It works end to end with the mock provider.
+This is an early version. It works end to end with the mock provider and
+with Cohere.
 
 - [x] Suite format, validation, matchers
 - [x] Parallel runner with retries, timeouts, reproducible seeds
 - [x] Pass rates with Wilson intervals, Fisher + Holm regression test
-- [ ] Cohere provider (tool use via the Chat API), then Anthropic and OpenAI
+- [x] Cohere provider (Chat API v2 with tools), with pacing, response cache and request budget
 - [ ] Description tuning: rank several wordings, with a held-out set against overfitting
 - [ ] Multi-step scenarios checked against the end state of a mock API
-- [ ] Response cache, Markdown report for pull request comments, GitHub Action
+- [ ] Anthropic and OpenAI providers
+- [ ] Markdown report for pull request comments, GitHub Action
 
 ## How this was built
 

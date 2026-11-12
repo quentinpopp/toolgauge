@@ -101,14 +101,16 @@ type job struct {
 // ordered by scenario then index regardless of completion order. Provider
 // errors become trials with outcome "error".
 //
-// If ctx is cancelled, Run stops sending requests and returns the trials that
-// finished before the cancellation, together with ctx.Err(), so the caller
-// can still save what was paid for.
-func Run(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Config) ([]Trial, error) {
+// If ctx is cancelled, or the provider reports provider.ErrBudgetExhausted,
+// Run stops sending requests and returns the trials that finished before,
+// together with the reason, so the caller can still save what was paid for.
+func Run(parent context.Context, p provider.Provider, s *spec.Suite, cfg Config) ([]Trial, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	cfg.defaults()
+	ctx, stop := context.WithCancelCause(parent)
+	defer stop(nil)
 	trials := make([]Trial, len(s.Scenarios)*cfg.Runs)
 	done := make([]bool, len(trials))
 	jobs := make(chan job)
@@ -119,7 +121,7 @@ func Run(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Config) ([
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				trials[j.slot], done[j.slot] = runTrial(ctx, p, s, cfg, j)
+				trials[j.slot], done[j.slot] = runTrial(ctx, stop, p, s, cfg, j)
 			}
 		}()
 	}
@@ -136,21 +138,21 @@ feed:
 	}
 	close(jobs)
 	wg.Wait()
-	if err := ctx.Err(); err != nil {
+	if ctx.Err() != nil {
 		finished := make([]Trial, 0, len(trials))
 		for i, t := range trials {
 			if done[i] {
 				finished = append(finished, t)
 			}
 		}
-		return finished, err
+		return finished, context.Cause(ctx)
 	}
 	return trials, nil
 }
 
-// runTrial runs one trial. The bool is false if the run was cancelled before
+// runTrial runs one trial. The bool is false if the run was stopped before
 // the trial reached a result of its own, so it must not be counted.
-func runTrial(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Config, j job) (Trial, bool) {
+func runTrial(ctx context.Context, stop context.CancelCauseFunc, p provider.Provider, s *spec.Suite, cfg Config, j job) (Trial, bool) {
 	t := Trial{Scenario: j.sc.ID, Index: j.index}
 	req := provider.Request{
 		Model:  cfg.Model,
@@ -173,6 +175,12 @@ func runTrial(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Confi
 		resp, err = p.Complete(actx, req)
 		timedOut := errors.Is(actx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 		cancel()
+		if errors.Is(err, provider.ErrBudgetExhausted) {
+			// Out of budget is not the model's fault: stop the whole run
+			// rather than record an error trial.
+			stop(err)
+			return t, false
+		}
 		if ctx.Err() != nil {
 			// Whatever came back was cut short by the cancellation.
 			return t, false
@@ -183,7 +191,8 @@ func runTrial(ctx context.Context, p provider.Provider, s *spec.Suite, cfg Confi
 		if !provider.IsRetryable(err) && !timedOut {
 			break
 		}
-		wait := time.NewTimer(cfg.backoff(attempt, jitter))
+		// Honour the server's Retry-After if it asks for a longer pause.
+		wait := time.NewTimer(max(cfg.backoff(attempt, jitter), provider.RetryAfter(err)))
 		select {
 		case <-wait.C:
 		case <-ctx.Done():
