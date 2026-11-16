@@ -4,6 +4,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/quentinpopp/toolgauge/internal/spec"
 )
@@ -49,17 +50,39 @@ type Usage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
+// ErrBudgetExhausted is returned when a run has used up its request budget.
+// The runner stops the run when it sees it, like a cancellation.
+var ErrBudgetExhausted = errors.New("request budget exhausted")
+
 // retryable marks errors worth retrying: rate limits, timeouts, 5xx.
-type retryable struct{ err error }
+type retryable struct {
+	err   error
+	after time.Duration
+}
 
 func (r retryable) Error() string { return r.err.Error() }
 func (r retryable) Unwrap() error { return r.err }
 
 // Retryable wraps err so the runner retries the request.
-func Retryable(err error) error { return retryable{err} }
+func Retryable(err error) error { return retryable{err: err} }
+
+// RetryableAfter is Retryable with a minimum wait, typically from a
+// Retry-After header. The runner waits at least this long before retrying.
+func RetryableAfter(err error, after time.Duration) error {
+	return retryable{err: err, after: after}
+}
 
 // IsRetryable reports whether err, or an error it wraps, was marked retryable.
 func IsRetryable(err error) bool {
 	var r retryable
 	return errors.As(err, &r)
+}
+
+// RetryAfter returns the minimum wait attached with RetryableAfter, or 0.
+func RetryAfter(err error) time.Duration {
+	var r retryable
+	if errors.As(err, &r) {
+		return r.after
+	}
+	return 0
 }

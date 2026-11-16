@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/quentinpopp/toolgauge/internal/provider"
+	"github.com/quentinpopp/toolgauge/internal/provider/cache"
+	"github.com/quentinpopp/toolgauge/internal/provider/cohere"
+	"github.com/quentinpopp/toolgauge/internal/provider/limit"
 	"github.com/quentinpopp/toolgauge/internal/provider/mock"
 	"github.com/quentinpopp/toolgauge/internal/report"
 	"github.com/quentinpopp/toolgauge/internal/runner"
@@ -97,9 +100,13 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	fs.SetOutput(stderr)
 	var (
 		cfg          runner.Config
-		providerName = fs.String("provider", "mock", "model provider (mock)")
+		providerName = fs.String("provider", "mock", "model provider: mock or cohere")
 		descriptions = fs.String("descriptions", "", "YAML file mapping tool names to alternative descriptions")
 		out          = fs.String("out", "", "write the full report as JSON to this file")
+		rateLimit    = fs.Float64("rate-limit", -1, "max requests per minute (default: 20 for cohere, none for mock; 0 disables)")
+		maxRequests  = fs.Int("max-requests", 0, "stop after this many API requests, retries included (0: no limit)")
+		cacheDir     = fs.String("cache-dir", ".toolgauge-cache", "cache responses of real providers here")
+		noCache      = fs.Bool("no-cache", false, "always call the provider, ignoring the cache")
 		mockCfg      = mock.DefaultConfig()
 	)
 	fs.StringVar(&cfg.Model, "model", "", "model name passed to the provider")
@@ -121,6 +128,9 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	if *maxRequests < 0 {
+		return errors.New("max-requests must not be negative")
+	}
 	s, err := spec.Load(fs.Arg(0))
 	if err != nil {
 		return err
@@ -135,24 +145,65 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		}
 	}
 
-	var p provider.Provider
+	// The provider stack, from the outside in: cache, then rate limit and
+	// budget, then the API. Cached answers skip the limits and cost nothing.
+	var base provider.Provider
+	perMinute := *rateLimit
 	switch *providerName {
 	case "mock":
-		p = mock.New(mockCfg)
+		base = mock.New(mockCfg)
+		if perMinute < 0 {
+			perMinute = 0
+		}
+	case "cohere":
+		c, err := cohere.New(cohere.Config{APIKey: os.Getenv("COHERE_API_KEY")})
+		if err != nil {
+			return err
+		}
+		base = c
+		if cfg.Model == "" {
+			cfg.Model = cohere.DefaultModel
+		}
+		if perMinute < 0 {
+			perMinute = 20 // Cohere's trial limit for chat models
+		}
 	default:
-		return fmt.Errorf("unknown provider %q (available: mock)", *providerName)
+		return fmt.Errorf("unknown provider %q (available: mock, cohere)", *providerName)
+	}
+	limited := limit.Wrap(base, perMinute, *maxRequests)
+	var p provider.Provider = limited
+	var cached *cache.Provider
+	if *providerName != "mock" && !*noCache && *cacheDir != "" {
+		if cached, err = cache.Wrap(limited, *cacheDir); err != nil {
+			return err
+		}
+		p = cached
+	}
+
+	planned := len(s.Scenarios) * cfg.Runs
+	if *providerName != "mock" {
+		fmt.Fprintf(stdout, "%s · model %s · %d trials", p.Name(), cfg.Model, planned)
+		if perMinute > 0 {
+			fmt.Fprintf(stdout, " · at most %.0f requests/min, so up to %s if nothing is cached",
+				perMinute, (time.Duration(float64(planned) / perMinute * float64(time.Minute))).Round(time.Second))
+		}
+		fmt.Fprint(stdout, "\n\n")
 	}
 
 	trials, runErr := runner.Run(ctx, p, s, cfg)
-	if runErr != nil && ctx.Err() == nil {
+	stopped := ctx.Err() != nil || errors.Is(runErr, provider.ErrBudgetExhausted)
+	if runErr != nil && !stopped {
 		return runErr
 	}
-	// A cancelled run still produces a report of the trials that finished,
+	// A stopped run still produces a report of the trials that finished,
 	// so tokens already paid for are not thrown away.
 	r := &report.Report{
 		Suite: s.Name, Provider: p.Name(), Model: cfg.Model, Runs: cfg.Runs,
 		Seed: cfg.Seed, CreatedAt: time.Now().UTC(), Trials: trials,
-		Incomplete: runErr != nil,
+		Incomplete: runErr != nil, Requests: limited.Sent(),
+	}
+	if cached != nil {
+		r.CacheHits, _ = cached.Stats()
 	}
 	r.Total, r.Scenarios = report.Build(trials)
 	r.AddFingerprints(s)
@@ -164,7 +215,7 @@ func cmdRun(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 		fmt.Fprintf(stdout, "\nreport written to %s\n", *out)
 	}
 	if runErr != nil {
-		return fmt.Errorf("run cancelled after %d of %d trials: %w", len(trials), len(s.Scenarios)*cfg.Runs, runErr)
+		return fmt.Errorf("run stopped after %d of %d trials: %w", len(trials), planned, runErr)
 	}
 	return nil
 }
